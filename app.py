@@ -55,12 +55,28 @@ if not is_authorized():
 st.title("🎙️ Video Transcriber")
 st.caption("Wklej link (TikTok / YouTube Shorts / Instagram Reels) i pobierz transkrypt po polsku.")
 
+# Pole z kluczem "video_url_input" trzeba wyczyścić PRZED jego instancjonowaniem
+# w tym przebiegu skryptu — inaczej Streamlit rzuca StreamlitWidgetAlreadyInstantiatedError.
+if st.session_state.pop("clear_url", False):
+    st.session_state["video_url_input"] = ""
+
 with st.form("transcribe_form", clear_on_submit=False):
     url = st.text_input(
         "Link do wideo",
         placeholder="Wklej link z TikTok / YouTube Shorts / Instagram Reels...",
+        key="video_url_input",
     )
-    submit_button = st.form_submit_button("Transkrybuj", type="primary")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        submit_button = st.form_submit_button("Transkrybuj", type="primary")
+    with col2:
+        clear_button = st.form_submit_button("Wyczyść")
+
+if clear_button:
+    st.session_state["clear_url"] = True
+    st.session_state["result"] = None
+    st.session_state["error"] = None
+    st.rerun()
 
 if submit_button:
     if not url.strip():
