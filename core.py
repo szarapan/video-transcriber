@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import uuid
 
+import yt_dlp
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -49,20 +50,35 @@ def download_audio(url: str) -> str:
     tmp_dir = tempfile.gettempdir()
     output_id = uuid.uuid4().hex
     output_template = os.path.join(tmp_dir, f"video_transcriber_{output_id}.%(ext)s")
-
-    cmd = [
-        "yt-dlp",
-        "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
-        "-o", output_template,
-        url,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Pobieranie audio nie powiodło się:\n{result.stderr}")
-
     expected_path = os.path.join(tmp_dir, f"video_transcriber_{output_id}.mp3")
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_template,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "0",
+            }
+        ],
+        # Klient mobilny omija blokadę 403 na serwerach chmurowych (brak IP rezydencjalnego).
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+            }
+        },
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"Pobieranie audio nie powiodło się:\n{e}")
+
     if not os.path.exists(expected_path):
         raise RuntimeError(
             f"Nie znaleziono pobranego pliku audio (oczekiwano: {expected_path})."
