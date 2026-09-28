@@ -53,7 +53,7 @@ def download_audio(url: str) -> str:
     expected_path = os.path.join(tmp_dir, f"video_transcriber_{output_id}.mp3")
 
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "ba[ext=m4a]/ba/b",
         "outtmpl": output_template,
         "postprocessors": [
             {
@@ -62,10 +62,14 @@ def download_audio(url: str) -> str:
                 "preferredquality": "0",
             }
         ],
-        # Klient mobilny omija blokadę 403 na serwerach chmurowych (brak IP rezydencjalnego).
+        # Node.js do rozwiązywania wyzwań podpisu YouTube (JS challenge).
+        "js_runtimes": {"node": {}},
+        # Klienci mweb/tv omijają blokadę 403 na serwerowych IP (datacenter).
+        # android jako fallback: mweb/tv same w sobie nie zwracały żadnych
+        # formatów na obecnej wersji yt-dlp (2026.08.19) nawet lokalnie.
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"],
+                "player_client": ["mweb", "tv", "android"],
             }
         },
         "quiet": True,
