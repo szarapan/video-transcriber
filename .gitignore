@@ -1,0 +1,15 @@
+.venv/
+.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+*.log
+
+# tymczasowe pliki audio/wideo
+*.mp3
+*.mp4
+*.wav
+*.m4a
+*.webm
+*.mov
+*.mkv
