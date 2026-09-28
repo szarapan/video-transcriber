@@ -22,14 +22,17 @@ def get_app_pin() -> str:
 
 
 def is_authorized() -> bool:
+    """Sesja trwała: raz zalogowany PIN zostaje zapisany w st.query_params,
+    więc przeżywa odświeżenie strony, uśpienie telefonu i bezczynność —
+    w przeciwieństwie do samego st.session_state, który ginie z nową sesją."""
     app_pin = get_app_pin()
 
-    if st.session_state.get("authorized"):
+    if st.session_state.get("authenticated"):
         return True
 
     # Autoryzacja przez parametr w URL, np. ...?pin=1234 (wygodne na telefonie).
     if st.query_params.get("pin") == app_pin:
-        st.session_state["authorized"] = True
+        st.session_state["authenticated"] = True
         return True
 
     return False
@@ -44,8 +47,11 @@ if not is_authorized():
         login_button = st.form_submit_button("Zaloguj")
 
     if login_button:
-        if pin_input == get_app_pin():
-            st.session_state["authorized"] = True
+        app_pin = get_app_pin()
+        if pin_input == app_pin:
+            # Zapisz PIN w URL, żeby logowanie przetrwało odświeżenie/nową sesję.
+            st.query_params["pin"] = app_pin
+            st.session_state["authenticated"] = True
             st.rerun()
         else:
             st.error("Nieprawidłowy PIN.")
