@@ -5,16 +5,32 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 
 import yt_dlp
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors, types
 from youtube_transcript_api import YouTubeTranscriptApi
 
 load_dotenv()
 
-MODEL_NAME = "gemini-3.1-flash-lite"
+# Modele próbowane po kolei — jeśli jeden jest przeciążony (503) lub ma
+# wyczerpany limit (429), przechodzimy do kolejnego zamiast wywalać całą
+# transkrypcję. gemini-2.5-flash / gemini-2.0-flash / gemini-1.5-flash nie są
+# już dostępne dla tego klucza (404 "no longer available") — pominięte.
+MODELS_TO_TRY = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+]
+MAX_ATTEMPTS_PER_MODEL = 2
+RETRY_DELAY_SECONDS = 2
+RETRYABLE_STATUSES = {"UNAVAILABLE", "RESOURCE_EXHAUSTED"}
+GENERATION_CONFIG = types.GenerateContentConfig(max_output_tokens=8192)
+
 PROMPT = (
     "Transkrybuj to nagranie i przetłumacz mowę na naturalny, płynny język polski "
     "w formie czytelnych akapitów. Zwróć WYŁĄCZNIE gotowe polskie tłumaczenie — "
@@ -132,16 +148,43 @@ def get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def generate_content_with_fallback(client: genai.Client, contents: list) -> "types.GenerateContentResponse":
+    """Woła Gemini z automatycznym fallbackiem po modelach z MODELS_TO_TRY.
+
+    Dla każdego modelu: do MAX_ATTEMPTS_PER_MODEL prób z pauzą RETRY_DELAY_SECONDS
+    między próbami, jeśli błąd to 503 UNAVAILABLE lub 429 RESOURCE_EXHAUSTED.
+    Inne błędy (np. 404 - model niedostępny) od razu przechodzą do kolejnego modelu.
+    """
+    last_error: Exception | None = None
+
+    for model in MODELS_TO_TRY:
+        for attempt in range(1, MAX_ATTEMPTS_PER_MODEL + 1):
+            try:
+                return client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=GENERATION_CONFIG,
+                )
+            except errors.APIError as e:
+                last_error = e
+                retryable = getattr(e, "status", None) in RETRYABLE_STATUSES
+                if retryable and attempt < MAX_ATTEMPTS_PER_MODEL:
+                    time.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                break  # przejdź do kolejnego modelu
+
+    raise RuntimeError(
+        f"Wszystkie modele Gemini są niedostępne (przeciążenie lub błąd): {last_error}"
+    )
+
+
 def transcribe_and_translate(audio_path: str) -> str:
     """Wysyła plik audio do Gemini i zwraca transkrypt przetłumaczony na polski."""
     client = get_client()
 
     uploaded_file = client.files.upload(file=audio_path)
     try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=[PROMPT, uploaded_file],
-        )
+        response = generate_content_with_fallback(client, [PROMPT, uploaded_file])
     finally:
         try:
             client.files.delete(name=uploaded_file.name)
@@ -183,10 +226,7 @@ def fetch_youtube_transcript_text(video_id: str) -> str | None:
 def translate_text_with_gemini(text: str) -> str:
     """Tłumaczy/formatuje gotowy transkrypt tekstowy na naturalny polski przez Gemini."""
     client = get_client()
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=[TRANSLATE_PROMPT + text],
-    )
+    response = generate_content_with_fallback(client, [TRANSLATE_PROMPT + text])
     return response.text
 
 
