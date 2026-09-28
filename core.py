@@ -10,7 +10,6 @@ import uuid
 import yt_dlp
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
 from youtube_transcript_api import YouTubeTranscriptApi
 
 load_dotenv()
@@ -34,16 +33,10 @@ def is_youtube_url(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
 
 
-def normalize_youtube_url(url: str) -> str:
-    """Zamienia link do YouTube Shorts na standardowy URL wideo."""
-    match = re.search(r"youtube\.com/shorts/([\w-]+)", url)
-    if match:
-        return f"https://www.youtube.com/watch?v={match.group(1)}"
-    return url
-
-
 def extract_youtube_video_id(url: str) -> str | None:
-    match = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", url)
+    """Wyciąga 11-znakowe video_id z dowolnego formatu linku YouTube
+    (watch?v=, youtu.be/, shorts/)."""
+    match = re.search(r"(?:v=|\/|shorts\/)([0-9A-Za-z_-]{11})", url)
     return match.group(1) if match else None
 
 
@@ -159,17 +152,32 @@ def transcribe_and_translate(audio_path: str) -> str:
 
 
 def fetch_youtube_transcript_text(video_id: str) -> str | None:
-    """Próbuje pobrać gotowe napisy/transkrypcję z YouTube (dowolny dostępny język).
+    """Pobiera gotowe napisy/transkrypcję z YouTube po samym video_id.
 
-    Zwraca None, jeśli wideo nie ma żadnych napisów (yt-dlp/Gemini przejmą wtedy dalej).
+    Preferuje polski/angielski, w razie braku bierze dowolny dostępny transkrypt
+    (ręczny lub automatycznie wygenerowany). Zwraca None, jeśli wideo nie ma
+    żadnych napisów.
     """
     try:
         transcript_list = YouTubeTranscriptApi().list(video_id)
-        transcript = next(iter(transcript_list))
-        fetched = transcript.fetch()
-        return " ".join(snippet.text for snippet in fetched)
     except Exception:
         return None
+
+    try:
+        transcript = transcript_list.find_transcript(["pl", "en"])
+    except Exception:
+        try:
+            transcript = next(iter(transcript_list))
+        except StopIteration:
+            return None
+
+    try:
+        data = transcript.fetch().to_raw_data()
+    except Exception:
+        return None
+
+    full_text = " ".join(item["text"] for item in data).strip()
+    return full_text or None
 
 
 def translate_text_with_gemini(text: str) -> str:
@@ -182,33 +190,24 @@ def translate_text_with_gemini(text: str) -> str:
     return response.text
 
 
-def transcribe_youtube_via_uri(url: str) -> str:
-    """Fallback: przekazuje URL YouTube bezpośrednio do Gemini (bez pobierania pliku)."""
-    client = get_client()
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=[
-            PROMPT,
-            types.Part.from_uri(file_uri=url, mime_type="video/mp4"),
-        ],
-    )
-    return response.text
-
-
 def transcribe_youtube(url: str) -> str:
-    """Pipeline dla YouTube: najpierw gotowe napisy, potem URL bezpośrednio do Gemini.
+    """Pipeline dla YouTube: wyłącznie gotowe napisy (youtube-transcript-api) + Gemini.
 
-    Nie pobiera pliku audio przez yt-dlp — serwery YouTube blokują IP chmurowe (403).
+    Nie pobiera pliku audio przez yt-dlp (blokada 403 na IP chmurowych) ani nie
+    przekazuje URL do Gemini przez Part.from_uri (też zwraca 403 PERMISSION_DENIED
+    dla kluczy Google AI Studio).
     """
-    normalized_url = normalize_youtube_url(url)
-    video_id = extract_youtube_video_id(normalized_url)
+    video_id = extract_youtube_video_id(url)
+    if not video_id:
+        raise RuntimeError(f"Nie udało się rozpoznać video_id w linku: {url}")
 
-    if video_id:
-        transcript_text = fetch_youtube_transcript_text(video_id)
-        if transcript_text:
-            return translate_text_with_gemini(transcript_text)
+    transcript_text = fetch_youtube_transcript_text(video_id)
+    if not transcript_text:
+        raise RuntimeError(
+            "Ten film na YouTube nie ma dostępnych napisów/ścieżki transkrypcyjnej."
+        )
 
-    return transcribe_youtube_via_uri(normalized_url)
+    return translate_text_with_gemini(transcript_text)
 
 
 def transcribe_url(url: str) -> str:
