@@ -9,16 +9,24 @@ st.set_page_config(page_title="Video Transcriber", page_icon="🎙️")
 st.title("🎙️ Video Transcriber")
 st.caption("Wklej link (TikTok / YouTube Shorts / Instagram Reels) i pobierz transkrypt po polsku.")
 
-url = st.text_input("Link do wideo", placeholder="https://www.tiktok.com/@user/video/...")
+with st.form("transcribe_form", clear_on_submit=False):
+    url = st.text_input(
+        "Link do wideo",
+        placeholder="Wklej link z TikTok / YouTube Shorts / Instagram Reels...",
+    )
+    submit_button = st.form_submit_button("Transkrybuj", type="primary")
 
-if st.button("Transkrybuj", type="primary", disabled=not url):
-    with st.spinner("Pobieram audio i tłumaczę..."):
-        try:
-            st.session_state["result"] = transcribe_url(url)
-            st.session_state["error"] = None
-        except Exception as e:
-            st.session_state["result"] = None
-            st.session_state["error"] = str(e)
+if submit_button:
+    if not url.strip():
+        st.warning("Proszę podać link do wideo.")
+    else:
+        with st.spinner("Pobieram audio i tłumaczę..."):
+            try:
+                st.session_state["result"] = transcribe_url(url)
+                st.session_state["error"] = None
+            except Exception as e:
+                st.session_state["result"] = None
+                st.session_state["error"] = str(e)
 
 if st.session_state.get("error"):
     st.error(st.session_state["error"])
