@@ -1,6 +1,7 @@
 """Core logic: pobieranie audio z linku i transkrypcja/tłumaczenie przez Gemini."""
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ import yt_dlp
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from youtube_transcript_api import YouTubeTranscriptApi
 
 load_dotenv()
 
@@ -20,6 +22,29 @@ PROMPT = (
     "bez oryginalnego tekstu, bez nagłówków, list ani żadnych komentarzy, "
     "tylko czysty tekst podzielony na akapity."
 )
+TRANSLATE_PROMPT = (
+    "Poniżej znajduje się surowy transkrypt nagrania. Przetłumacz go na naturalny, "
+    "płynny język polski w formie czytelnych akapitów. Zwróć WYŁĄCZNIE gotowe "
+    "polskie tłumaczenie — bez oryginalnego tekstu, bez nagłówków, list ani "
+    "żadnych komentarzy, tylko czysty tekst podzielony na akapity.\n\nTranskrypt:\n"
+)
+
+
+def is_youtube_url(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+
+def normalize_youtube_url(url: str) -> str:
+    """Zamienia link do YouTube Shorts na standardowy URL wideo."""
+    match = re.search(r"youtube\.com/shorts/([\w-]+)", url)
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return url
+
+
+def extract_youtube_video_id(url: str) -> str | None:
+    match = re.search(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})", url)
+    return match.group(1) if match else None
 
 
 def ensure_ffmpeg() -> None:
@@ -105,15 +130,18 @@ def get_api_key() -> str | None:
     return os.environ.get("GEMINI_API_KEY")
 
 
-def transcribe_and_translate(audio_path: str) -> str:
-    """Wysyła plik audio do Gemini i zwraca transkrypt przetłumaczony na polski."""
+def get_client() -> genai.Client:
     api_key = get_api_key()
     if not api_key:
         raise RuntimeError(
             "Brak GEMINI_API_KEY (ani w st.secrets, ani w .env / zmiennych środowiskowych)."
         )
+    return genai.Client(api_key=api_key)
 
-    client = genai.Client(api_key=api_key)
+
+def transcribe_and_translate(audio_path: str) -> str:
+    """Wysyła plik audio do Gemini i zwraca transkrypt przetłumaczony na polski."""
+    client = get_client()
 
     uploaded_file = client.files.upload(file=audio_path)
     try:
@@ -130,8 +158,64 @@ def transcribe_and_translate(audio_path: str) -> str:
     return response.text
 
 
+def fetch_youtube_transcript_text(video_id: str) -> str | None:
+    """Próbuje pobrać gotowe napisy/transkrypcję z YouTube (dowolny dostępny język).
+
+    Zwraca None, jeśli wideo nie ma żadnych napisów (yt-dlp/Gemini przejmą wtedy dalej).
+    """
+    try:
+        transcript_list = YouTubeTranscriptApi().list(video_id)
+        transcript = next(iter(transcript_list))
+        fetched = transcript.fetch()
+        return " ".join(snippet.text for snippet in fetched)
+    except Exception:
+        return None
+
+
+def translate_text_with_gemini(text: str) -> str:
+    """Tłumaczy/formatuje gotowy transkrypt tekstowy na naturalny polski przez Gemini."""
+    client = get_client()
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[TRANSLATE_PROMPT + text],
+    )
+    return response.text
+
+
+def transcribe_youtube_via_uri(url: str) -> str:
+    """Fallback: przekazuje URL YouTube bezpośrednio do Gemini (bez pobierania pliku)."""
+    client = get_client()
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[
+            PROMPT,
+            types.Part.from_uri(file_uri=url, mime_type="video/mp4"),
+        ],
+    )
+    return response.text
+
+
+def transcribe_youtube(url: str) -> str:
+    """Pipeline dla YouTube: najpierw gotowe napisy, potem URL bezpośrednio do Gemini.
+
+    Nie pobiera pliku audio przez yt-dlp — serwery YouTube blokują IP chmurowe (403).
+    """
+    normalized_url = normalize_youtube_url(url)
+    video_id = extract_youtube_video_id(normalized_url)
+
+    if video_id:
+        transcript_text = fetch_youtube_transcript_text(video_id)
+        if transcript_text:
+            return translate_text_with_gemini(transcript_text)
+
+    return transcribe_youtube_via_uri(normalized_url)
+
+
 def transcribe_url(url: str) -> str:
-    """Pełny pipeline: pobiera audio z linku, transkrybuje i usuwa plik tymczasowy."""
+    """Pełny pipeline: rozpoznaje platformę i wybiera odpowiednią ścieżkę transkrypcji."""
+    if is_youtube_url(url):
+        return transcribe_youtube(url)
+
     audio_path = download_audio(url)
     try:
         return transcribe_and_translate(audio_path)
