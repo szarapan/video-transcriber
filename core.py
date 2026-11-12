@@ -12,7 +12,12 @@ import yt_dlp
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import (
+    NoTranscriptFound,
+    TranscriptsDisabled,
+    VideoUnavailable,
+    YouTubeTranscriptApi,
+)
 
 load_dotenv()
 
@@ -28,6 +33,10 @@ MODELS_TO_TRY = [
 ]
 MAX_ATTEMPTS_PER_MODEL = 2
 RETRY_DELAY_SECONDS = 2
+TRANSCRIPT_MAX_ATTEMPTS = 4
+TRANSCRIPT_BASE_DELAY_SECONDS = 2  # 2s, 4s, 8s między kolejnymi próbami
+# Błędy trwałe (film bez napisów / niedostępny) — ponawianie nic nie da.
+NO_TRANSCRIPT_ERRORS = (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable)
 RETRYABLE_STATUSES = {"UNAVAILABLE", "RESOURCE_EXHAUSTED"}
 GENERATION_CONFIG = types.GenerateContentConfig(max_output_tokens=8192)
 
@@ -194,33 +203,45 @@ def transcribe_and_translate(audio_path: str) -> str:
     return response.text
 
 
+def _fetch_youtube_transcript_once(video_id: str) -> str:
+    """Jedna próba pobrania napisów. Rzuca wyjątek przy błędzie (także blokadzie)."""
+    transcript_list = YouTubeTranscriptApi().list(video_id)
+
+    try:
+        transcript = transcript_list.find_transcript(["pl", "en"])
+    except NoTranscriptFound:
+        # brak pl/en — bierzemy dowolny dostępny transkrypt
+        transcript = next(iter(transcript_list), None)
+        if transcript is None:
+            raise
+
+    data = transcript.fetch().to_raw_data()
+    return " ".join(item["text"] for item in data).strip()
+
+
 def fetch_youtube_transcript_text(video_id: str) -> str | None:
     """Pobiera gotowe napisy/transkrypcję z YouTube po samym video_id.
 
     Preferuje polski/angielski, w razie braku bierze dowolny dostępny transkrypt
     (ręczny lub automatycznie wygenerowany). Zwraca None, jeśli wideo nie ma
-    żadnych napisów.
+    żadnych napisów. Przy błędach (zwykle blokada antybotowa YouTube na IP
+    chmurowych) ponawia do TRANSCRIPT_MAX_ATTEMPTS razy z exponential backoff
+    (2s, 4s, 8s); po wyczerpaniu prób rzuca RuntimeError z czytelnym komunikatem.
     """
-    try:
-        transcript_list = YouTubeTranscriptApi().list(video_id)
-    except Exception:
-        return None
-
-    try:
-        transcript = transcript_list.find_transcript(["pl", "en"])
-    except Exception:
+    for attempt in range(1, TRANSCRIPT_MAX_ATTEMPTS + 1):
         try:
-            transcript = next(iter(transcript_list))
-        except StopIteration:
+            return _fetch_youtube_transcript_once(video_id) or None
+        except NO_TRANSCRIPT_ERRORS:
             return None
+        except Exception:
+            if attempt == TRANSCRIPT_MAX_ATTEMPTS:
+                break
+            time.sleep(TRANSCRIPT_BASE_DELAY_SECONDS * 2 ** (attempt - 1))
 
-    try:
-        data = transcript.fetch().to_raw_data()
-    except Exception:
-        return None
-
-    full_text = " ".join(item["text"] for item in data).strip()
-    return full_text or None
+    raise RuntimeError(
+        "YouTube zablokował zapytanie o napisy (ochrona antybotowa). "
+        f"Próbowano {TRANSCRIPT_MAX_ATTEMPTS} razy — spróbuj ponownie za chwilę."
+    )
 
 
 def translate_text_with_gemini(text: str) -> str:

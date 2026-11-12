@@ -2,4 +2,4 @@ yt-dlp
 google-genai
 python-dotenv
 streamlit
-youtube-transcript-api
+youtube-transcript-api>=1.0.0
